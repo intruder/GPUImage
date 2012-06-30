@@ -255,9 +255,9 @@ NSString *const kGPUImageToneCurveFragmentShaderString = SHADER_STRING
         for (unsigned int currentCurveIndex = 0; currentCurveIndex < 256; currentCurveIndex++)
         {
             // BGRA for upload to texture
-            toneCurveByteArray[currentCurveIndex * 4]     = MIN(currentCurveIndex + [[_blueCurve objectAtIndex:currentCurveIndex] floatValue], 255);
-            toneCurveByteArray[currentCurveIndex * 4 + 1] = MIN(currentCurveIndex + [[_greenCurve objectAtIndex:currentCurveIndex] floatValue], 255);
-            toneCurveByteArray[currentCurveIndex * 4 + 2] = MIN(currentCurveIndex + [[_redCurve objectAtIndex:currentCurveIndex] floatValue], 255);
+            toneCurveByteArray[currentCurveIndex * 4] = currentCurveIndex + [[_blueCurve objectAtIndex:currentCurveIndex] floatValue];
+            toneCurveByteArray[currentCurveIndex * 4 + 1] = currentCurveIndex + [[_greenCurve objectAtIndex:currentCurveIndex] floatValue];
+            toneCurveByteArray[currentCurveIndex * 4 + 2] = currentCurveIndex + [[_redCurve objectAtIndex:currentCurveIndex] floatValue];
             toneCurveByteArray[currentCurveIndex * 4 + 3] = 255;
         }
         
