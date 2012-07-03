@@ -49,7 +49,7 @@
     [stillImageSource addTarget:self];
     [stillImageSource processImage];
     
-    UIImage *processedImage = [self.terminalFilter imageFromCurrentlyProcessedOutput];
+    UIImage *processedImage = [self.terminalFilter imageFromCurrentlyProcessedOutputWithOrientation:imageToFilter.imageOrientation];
     
     [stillImageSource removeTarget:self];
     return processedImage;
