@@ -1,5 +1,6 @@
 #import "GPUImageCropFilter.h"
 
+#if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
 NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
 (
  varying highp vec2 textureCoordinate;
@@ -11,6 +12,19 @@ NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
      gl_FragColor = texture2D(inputImageTexture, textureCoordinate);
  }
 );
+#else
+NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
+(
+ varying vec2 textureCoordinate;
+ 
+ uniform sampler2D inputImageTexture;
+ 
+ void main()
+ {
+     gl_FragColor = texture2D(inputImageTexture, textureCoordinate);
+ }
+);
+#endif
 
 @interface GPUImageCropFilter ()
 
@@ -86,7 +100,7 @@ NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
     scaledSize.height = rotatedSize.height * _cropRegion.size.height;
 
     
-    if ( (CGSizeEqualToSize(inputTextureSize, CGSizeZero)) || (CGSizeEqualToSize(scaledSize, CGSizeZero)) )
+    if (CGSizeEqualToSize(scaledSize, CGSizeZero))
     {
         inputTextureSize = scaledSize;
     }
@@ -179,6 +193,20 @@ NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
             cropTextureCoordinates[6] = minX; // 0,1
             cropTextureCoordinates[7] = maxY;
         }; break;
+        case kGPUImageRotate180: // Broken
+        {
+            cropTextureCoordinates[0] = maxX; // 1,1
+            cropTextureCoordinates[1] = maxY;
+
+            cropTextureCoordinates[2] = maxX; // 1,0
+            cropTextureCoordinates[3] = minY;
+
+            cropTextureCoordinates[4] = minX; // 0,1
+            cropTextureCoordinates[5] = maxY;
+
+            cropTextureCoordinates[6] = minX; // 0,0
+            cropTextureCoordinates[7] = minY;
+        }; break;
         case kGPUImageRotateRightFlipVertical: // Fixed
         {
             cropTextureCoordinates[0] = minY; // 0,0
@@ -193,11 +221,13 @@ NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
             cropTextureCoordinates[6] = maxY; // 1,1
             cropTextureCoordinates[7] = 1.0 - minX;
         }; break;
-    }
+    }    
 }
 
-- (void)newFrameReadyAtTime:(CMTime)frameTime;
+- (void)newFrameReadyAtTime:(CMTime)frameTime atIndex:(NSInteger)textureIndex;
 {
+    outputTextureRetainCount = [targets count];
+
     static const GLfloat cropSquareVertices[] = {
         -1.0f, -1.0f,
         1.0f, -1.0f,
@@ -215,6 +245,11 @@ NSString *const kGPUImageCropFragmentShaderString =  SHADER_STRING
 
 - (void)setCropRegion:(CGRect)newValue;
 {
+    NSParameterAssert(newValue.origin.x >= 0 && newValue.origin.x <= 1 &&
+                      newValue.origin.y >= 0 && newValue.origin.y <= 1 &&
+                      newValue.size.width >= 0 && newValue.size.width <= 1 &&
+                      newValue.size.height >= 0 && newValue.size.height <= 1);
+
     _cropRegion = newValue;
     [self calculateCropTextureCoordinates];
 }

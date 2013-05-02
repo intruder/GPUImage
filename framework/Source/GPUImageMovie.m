@@ -7,14 +7,21 @@
     GPUImageMovieWriter *synchronizedMovieWriter;
     CVOpenGLESTextureCacheRef coreVideoTextureCache;
     AVAssetReader *reader;
+    CMTime previousFrameTime;
+    CFAbsoluteTime previousActualFrameTime;
 }
+
+- (void)processAsset;
 
 @end
 
 @implementation GPUImageMovie
 
 @synthesize url = _url;
+@synthesize asset = _asset;
 @synthesize runBenchmark = _runBenchmark;
+@synthesize playAtActualSpeed = _playAtActualSpeed;
+@synthesize delegate = _delegate;
 
 #pragma mark -
 #pragma mark Initialization and teardown
@@ -25,29 +32,59 @@
     {
         return nil;
     }
-    
-    if ([GPUImageOpenGLESContext supportsFastTextureUpload])
-    {
-        [GPUImageOpenGLESContext useImageProcessingContext];
-#if defined(__IPHONE_6_0)
-        CVReturn err = CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, [[GPUImageOpenGLESContext sharedImageProcessingOpenGLESContext] context], NULL, &coreVideoTextureCache);
-#else
-        CVReturn err = CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, (__bridge void *)[[GPUImageOpenGLESContext sharedImageProcessingOpenGLESContext] context], NULL, &coreVideoTextureCache);
-#endif
-        if (err) 
-        {
-            NSAssert(NO, @"Error at CVOpenGLESTextureCacheCreate %d", err);
-        }
-        
-        // Need to remove the initially created texture
-        [self deleteOutputTexture];
-    }
+
+    [self textureCacheSetup];
 
     self.url = url;
-    
+    self.asset = nil;
+
     return self;
 }
 
+- (id)initWithAsset:(AVAsset *)asset;
+{
+    if (!(self = [super init])) 
+    {
+      return nil;
+    }
+    
+    [self textureCacheSetup];
+
+    self.url = nil;
+    self.asset = asset;
+
+    return self;
+}
+
+- (void)textureCacheSetup;
+{
+    if ([GPUImageContext supportsFastTextureUpload])
+    {
+        runSynchronouslyOnVideoProcessingQueue(^{
+            [GPUImageContext useImageProcessingContext];
+#if defined(__IPHONE_6_0)
+            CVReturn err = CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, [[GPUImageContext sharedImageProcessingContext] context], NULL, &coreVideoTextureCache);
+#else
+            CVReturn err = CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, (__bridge void *)[[GPUImageContext sharedImageProcessingContext] context], NULL, &coreVideoTextureCache);
+#endif
+            if (err)
+            {
+                NSAssert(NO, @"Error at CVOpenGLESTextureCacheCreate %d", err);
+            }
+            
+            // Need to remove the initially created texture
+            [self deleteOutputTexture];
+        });
+    }
+}
+
+- (void)dealloc
+{
+    if ([GPUImageContext supportsFastTextureUpload])
+    {
+        CFRelease(coreVideoTextureCache);
+    }
+}
 #pragma mark -
 #pragma mark Movie processing
 
@@ -57,10 +94,21 @@
     movieWriter.encodingLiveVideo = NO;
 }
 
-- (void)startProcessing;
+- (void)startProcessing
 {
+    if(self.url == nil)
+    {
+      [self processAsset];
+      return;
+    }
+    
+    previousFrameTime = kCMTimeZero;
+    previousActualFrameTime = CFAbsoluteTimeGetCurrent();
+  
     NSDictionary *inputOptions = [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey];
     AVURLAsset *inputAsset = [[AVURLAsset alloc] initWithURL:self.url options:inputOptions];
+    
+    GPUImageMovie __block *blockSelf = self;
     
     [inputAsset loadValuesAsynchronouslyForKeys:[NSArray arrayWithObject:@"tracks"] completionHandler: ^{
         NSError *error = nil;
@@ -69,66 +117,76 @@
         {
             return;
         }
-        reader = [AVAssetReader assetReaderWithAsset:inputAsset error:&error];
-        
-        NSMutableDictionary *outputSettings = [NSMutableDictionary dictionary];
-        [outputSettings setObject: [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]  forKey: (NSString*)kCVPixelBufferPixelFormatTypeKey];
-        // Maybe set alwaysCopiesSampleData to NO on iOS 5.0 for faster video decoding
-        AVAssetReaderTrackOutput *readerVideoTrackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:[[inputAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0] outputSettings:outputSettings];
-        [reader addOutput:readerVideoTrackOutput];
-        
-        NSArray *audioTracks = [inputAsset tracksWithMediaType:AVMediaTypeAudio];
-        BOOL shouldRecordAudioTrack = (([audioTracks count] > 0) && (self.audioEncodingTarget != nil) );
-        AVAssetReaderTrackOutput *readerAudioTrackOutput = nil;
+        blockSelf.asset = inputAsset;
+        [blockSelf processAsset];
+        blockSelf = nil;
+    }];
+}
 
-        if (shouldRecordAudioTrack)
-        {            
-            audioEncodingIsFinished = NO;
-            
-            // This might need to be extended to handle movies with more than one audio track
-            AVAssetTrack* audioTrack = [audioTracks objectAtIndex:0];
-            readerAudioTrackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:audioTrack outputSettings:nil];
-            [reader addOutput:readerAudioTrackOutput];
-        }
+- (void)processAsset
+{
+    __unsafe_unretained GPUImageMovie *weakSelf = self;
+    NSError *error = nil;
+    reader = [AVAssetReader assetReaderWithAsset:self.asset error:&error];
 
-        if ([reader startReading] == NO) 
-        {
-            NSLog(@"Error reading from file at URL: %@", self.url);
-            return;
-        }
+    NSMutableDictionary *outputSettings = [NSMutableDictionary dictionary];
+    [outputSettings setObject: [NSNumber numberWithInt:kCVPixelFormatType_32BGRA]  forKey: (NSString*)kCVPixelBufferPixelFormatTypeKey];
+    // Maybe set alwaysCopiesSampleData to NO on iOS 5.0 for faster video decoding
+    AVAssetReaderTrackOutput *readerVideoTrackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:[[self.asset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0] outputSettings:outputSettings];
+    [reader addOutput:readerVideoTrackOutput];
+
+    NSArray *audioTracks = [self.asset tracksWithMediaType:AVMediaTypeAudio];
+    BOOL shouldRecordAudioTrack = (([audioTracks count] > 0) && (weakSelf.audioEncodingTarget != nil) );
+    AVAssetReaderTrackOutput *readerAudioTrackOutput = nil;
+
+    if (shouldRecordAudioTrack)
+    {
+        audioEncodingIsFinished = NO;
+
+        // This might need to be extended to handle movies with more than one audio track
+        AVAssetTrack* audioTrack = [audioTracks objectAtIndex:0];
+        readerAudioTrackOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:audioTrack outputSettings:nil];
+        [reader addOutput:readerAudioTrackOutput];
+    }
+
+    if ([reader startReading] == NO) 
+    {
+            NSLog(@"Error reading from file at URL: %@", weakSelf.url);
+        return;
+    }
         
-        if (synchronizedMovieWriter != nil)
+    if (synchronizedMovieWriter != nil)
+    {
+        [synchronizedMovieWriter setVideoInputReadyCallback:^{
+            [weakSelf readNextVideoFrameFromOutput:readerVideoTrackOutput];
+        }];
+
+        [synchronizedMovieWriter setAudioInputReadyCallback:^{
+            [weakSelf readNextAudioSampleFromOutput:readerAudioTrackOutput];
+        }];
+
+        [synchronizedMovieWriter enableSynchronizationCallbacks];
+    }
+    else
+    {
+        while (reader.status == AVAssetReaderStatusReading) 
         {
-            __unsafe_unretained GPUImageMovie *weakSelf = self;
-            
-            [synchronizedMovieWriter setVideoInputReadyCallback:^{
                 [weakSelf readNextVideoFrameFromOutput:readerVideoTrackOutput];
-            }];
 
-            [synchronizedMovieWriter setAudioInputReadyCallback:^{
-                [weakSelf readNextAudioSampleFromOutput:readerAudioTrackOutput];
-            }];
-            
-            [synchronizedMovieWriter enableSynchronizationCallbacks];
-        }
-        else
-        {
-            while (reader.status == AVAssetReaderStatusReading) 
+            if ( (shouldRecordAudioTrack) && (!audioEncodingIsFinished) )
             {
-                [self readNextVideoFrameFromOutput:readerVideoTrackOutput];
-                
-                if ( (shouldRecordAudioTrack) && (!audioEncodingIsFinished) )
-                {
-                    [self readNextAudioSampleFromOutput:readerAudioTrackOutput];
-                }
-                
-            }            
+                    [weakSelf readNextAudioSampleFromOutput:readerAudioTrackOutput];
+            }
 
-            if (reader.status == AVAssetWriterStatusCompleted) {
-                [self endProcessing];
+        }
+
+        if (reader.status == AVAssetWriterStatusCompleted) {
+                [weakSelf endProcessing];
+            if ([self.delegate respondsToSelector:@selector(didCompletePlayingMovie)]) {
+                [self.delegate didCompletePlayingMovie];
             }
         }
-    }];
+    }
 }
 
 - (void)readNextVideoFrameFromOutput:(AVAssetReaderTrackOutput *)readerVideoTrackOutput;
@@ -138,8 +196,28 @@
         CMSampleBufferRef sampleBufferRef = [readerVideoTrackOutput copyNextSampleBuffer];
         if (sampleBufferRef) 
         {
-            runOnMainQueueWithoutDeadlocking(^{
-                [self processMovieFrame:sampleBufferRef]; 
+            if (_playAtActualSpeed)
+            {
+                // Do this outside of the video processing queue to not slow that down while waiting
+                CMTime currentSampleTime = CMSampleBufferGetOutputPresentationTimeStamp(sampleBufferRef);
+                CMTime differenceFromLastFrame = CMTimeSubtract(currentSampleTime, previousFrameTime);
+                CFAbsoluteTime currentActualTime = CFAbsoluteTimeGetCurrent();
+                
+                CGFloat frameTimeDifference = CMTimeGetSeconds(differenceFromLastFrame);
+                CGFloat actualTimeDifference = currentActualTime - previousActualFrameTime;
+                
+                if (frameTimeDifference > actualTimeDifference)
+                {
+                    usleep(1000000.0 * (frameTimeDifference - actualTimeDifference));
+                }
+                
+                previousFrameTime = currentSampleTime;
+                previousActualFrameTime = CFAbsoluteTimeGetCurrent();
+            }
+
+            __unsafe_unretained GPUImageMovie *weakSelf = self;
+            runSynchronouslyOnVideoProcessingQueue(^{
+                [weakSelf processMovieFrame:sampleBufferRef];
             });
             
             CMSampleBufferInvalidate(sampleBufferRef);
@@ -171,10 +249,12 @@
     
     if (audioSampleBufferRef) 
     {
-        [self.audioEncodingTarget processAudioBuffer:audioSampleBufferRef]; 
-        
-        CMSampleBufferInvalidate(audioSampleBufferRef);
-        CFRelease(audioSampleBufferRef);
+        runSynchronouslyOnVideoProcessingQueue(^{
+            [self.audioEncodingTarget processAudioBuffer:audioSampleBufferRef];
+            
+            CMSampleBufferInvalidate(audioSampleBufferRef);
+            CFRelease(audioSampleBufferRef);
+        });
     }
     else
     {
@@ -184,19 +264,26 @@
 
 - (void)processMovieFrame:(CMSampleBufferRef)movieSampleBuffer; 
 {
+//    CMTimeGetSeconds
+//    CMTimeSubtract
+    
     CMTime currentSampleTime = CMSampleBufferGetOutputPresentationTimeStamp(movieSampleBuffer);
     CVImageBufferRef movieFrame = CMSampleBufferGetImageBuffer(movieSampleBuffer);
 
     int bufferHeight = CVPixelBufferGetHeight(movieFrame);
+#if TARGET_IPHONE_SIMULATOR
+    int bufferWidth = CVPixelBufferGetBytesPerRow(movieFrame) / 4; // This works around certain movie frame types on the Simulator (see https://github.com/BradLarson/GPUImage/issues/424)
+#else
     int bufferWidth = CVPixelBufferGetWidth(movieFrame);
+#endif
 
     CFAbsoluteTime startTime = CFAbsoluteTimeGetCurrent();
 
-    if ([GPUImageOpenGLESContext supportsFastTextureUpload])
+    if ([GPUImageContext supportsFastTextureUpload])
     {
         CVPixelBufferLockBaseAddress(movieFrame, 0);
         
-        [GPUImageOpenGLESContext useImageProcessingContext];
+        [GPUImageContext useImageProcessingContext];
         CVOpenGLESTextureRef texture = NULL;
         CVReturn err = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, coreVideoTextureCache, movieFrame, NULL, GL_TEXTURE_2D, GL_RGBA, bufferWidth, bufferHeight, GL_BGRA, GL_UNSIGNED_BYTE, 0, &texture);
         
@@ -214,14 +301,15 @@
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         
         for (id<GPUImageInput> currentTarget in targets)
-        {            
+        {
             NSInteger indexOfObject = [targets indexOfObject:currentTarget];
             NSInteger targetTextureIndex = [[targetTextureIndices objectAtIndex:indexOfObject] integerValue];
             
             [currentTarget setInputSize:CGSizeMake(bufferWidth, bufferHeight) atIndex:targetTextureIndex];
             [currentTarget setInputTexture:outputTexture atIndex:targetTextureIndex];
+            [currentTarget setTextureDelegate:self atIndex:targetTextureIndex];
             
-            [currentTarget newFrameReadyAtTime:currentSampleTime];
+            [currentTarget newFrameReadyAtTime:currentSampleTime atIndex:targetTextureIndex];
         }
         
         CVPixelBufferUnlockBaseAddress(movieFrame, 0);
@@ -247,7 +335,7 @@
             NSInteger targetTextureIndex = [[targetTextureIndices objectAtIndex:indexOfObject] integerValue];
 
             [currentTarget setInputSize:currentSize atIndex:targetTextureIndex];
-            [currentTarget newFrameReadyAtTime:currentSampleTime];
+            [currentTarget newFrameReadyAtTime:currentSampleTime atIndex:targetTextureIndex];
         }
         CVPixelBufferUnlockBaseAddress(movieFrame, 0);
     }

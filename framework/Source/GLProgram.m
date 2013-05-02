@@ -32,11 +32,15 @@ typedef void (*GLLogFunction) (GLuint program,
 @implementation GLProgram
 // START:init
 
+@synthesize initialized = _initialized;
+
 - (id)initWithVertexShaderString:(NSString *)vShaderString 
             fragmentShaderString:(NSString *)fShaderString;
 {
     if ((self = [super init])) 
     {
+        _initialized = NO;
+        
         attributes = [[NSMutableArray alloc] init];
         uniforms = [[NSMutableArray alloc] init];
         program = glCreateProgram();
@@ -134,7 +138,7 @@ typedef void (*GLLogFunction) (GLuint program,
     {
         [attributes addObject:attributeName];
         glBindAttribLocation(program, 
-                             [attributes indexOfObject:attributeName], 
+                             (GLuint)[attributes indexOfObject:attributeName],
                              [attributeName UTF8String]);
     }
 }
@@ -142,7 +146,7 @@ typedef void (*GLLogFunction) (GLuint program,
 // START:indexmethods
 - (GLuint)attributeIndex:(NSString *)attributeName
 {
-    return [attributes indexOfObject:attributeName];
+    return (GLuint)[attributes indexOfObject:attributeName];
 }
 - (GLuint)uniformIndex:(NSString *)uniformName
 {
@@ -172,6 +176,7 @@ typedef void (*GLLogFunction) (GLuint program,
         fragShader = 0;
     }
     
+    self.initialized = YES;
     return YES;
 }
 // END:link
